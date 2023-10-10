@@ -30,6 +30,18 @@ public class PlayerBase : MonoBehaviour
     public bool IsActionDone => isActionDone;
 
     /// <summary>
+    /// 성공한 공격 회수
+    /// </summary>
+    int successAttackCount;
+    public int SuccessAttackCount => successAttackCount;
+
+    /// <summary>
+    /// 실패한 공격 회수
+    /// </summary>
+    int failAttackCount;
+    public int FailAttackCount => failAttackCount;
+
+    /// <summary>
     /// 대전 상대
     /// </summary>
     protected PlayerBase opponent;
@@ -95,6 +107,13 @@ public class PlayerBase : MonoBehaviour
     /// </summary>
     public Action<PlayerBase> onDefeat;
 
+    /// <summary>
+    /// 초기화가 되었다는 표시
+    /// </summary>
+    bool isInitialized = false;
+
+
+
 
     protected virtual void Awake()
     {
@@ -105,45 +124,69 @@ public class PlayerBase : MonoBehaviour
 
     protected virtual void Start()
     {
-        // 배 생성
-        int shipTypeCount = ShipManager.Inst.ShipTypeCount;
-        ships = new Ship[shipTypeCount];
-        for(int i = 0; i < shipTypeCount; i++)
+        Initialize();
+    }
+
+    protected void Initialize()
+    {
+        if(!isInitialized)
         {
-            ShipType shipType = (ShipType)(i + 1);
-            ships[i] = ShipManager.Inst.MakeShip(shipType, transform);  // 배 종류별로 만들기
+            // 배 생성
+            int shipTypeCount = ShipManager.Inst.ShipTypeCount;
+            ships = new Ship[shipTypeCount];
+            for (int i = 0; i < shipTypeCount; i++)
+            {
+                ShipType shipType = (ShipType)(i + 1);
+                ships[i] = ShipManager.Inst.MakeShip(shipType, transform);  // 배 종류별로 만들기
 
-            ships[i].onSinking += OnShipDestroy;                // 함선이 침몰하면 OnShipDestroy 실행
+                ships[i].onSinking += OnShipDestroy;                        // 함선이 침몰하면 OnShipDestroy 실행
 
-            board.onShipAttacked[shipType] = ships[i].OnHitted; // 배가 맞을 때마다 실행될 함수 등록
+                board.onShipAttacked[shipType] = () => opponent.successAttackCount++;   // 내 보드가 맞았으니까 상대방의 공격이 성공했다.
+                board.onShipAttacked[shipType] += ships[i].OnHitted;        // 배가 맞을 때마다 실행될 함수 등록
+            }
+            remainShipCount = shipTypeCount;                    // 배 갯수 설정
+
+            // 보드 초기화
+            Board.ResetBoard(ships);
+
+            // 일반 공격 후보 지역 만들기
+            int fullSize = Board.BoardSize * Board.BoardSize;
+            int[] temp = new int[fullSize];
+            for (int i = 0; i < fullSize; i++)
+            {
+                temp[i] = i;        // 순서대로 0~99까지 채우기
+            }
+            Util.Shuffle(temp);     // 채운것 섞기
+            attackIndices = new List<int>(temp);   // 섞은 것을 기준으로 리스트만들기
+
+            // 우선 순위가 높은 공격 후보지역 만들기(비어있음)
+            attackHighIndices = new List<int>(10);
+
+            // 공격 관련 변수(이전에 공격이 성공한 적 없다고 표시)
+            lastAttackSuccessPosition = NOT_SUCCESS;
+
+            // 전투 씬일 때만 턴매니저 사용
+            if (GameManager.Inst.GameState == GameState.Battle)
+            {
+                // 행동이 완료되면 턴 진행 체크
+                onActionEnd += TurnManager.Inst.CheckTurnEnd;
+
+                // 패배하면 턴 메니저를 정지 시키기
+                onDefeat += (_) => TurnManager.Inst.TurnStop();
+
+                TurnManager temp2 = TurnManager.Inst;
+
+                // 턴 시작 초기화 함수와 종로 함수 연결
+                TurnManager.Inst.onTurnStart += OnPlayerTurnStart;
+                TurnManager.Inst.onTurnEnd += OnPlayerTurnEnd;
+            }
+
+            successAttackCount = 0;     // 결과 UI가 뜨는 타이밍 수정 필요
+            failAttackCount = 0;
+
+            OnPlayerTurnStart(0);
+            isInitialized = true;
         }
-        remainShipCount = shipTypeCount;                    // 배 갯수 설정
-
-        // 일반 공격 후보 지역 만들기
-        int fullSize = Board.BoardSize * Board.BoardSize;
-        int[] temp = new int[fullSize];
-        for(int i=0;i<fullSize;i++)
-        {
-            temp[i] = i;        // 순서대로 0~99까지 채우기
-        }
-        Util.Shuffle(temp);     // 채운것 섞기
-        attackIndices = new List<int>(temp);   // 섞은 것을 기준으로 리스트만들기
-
-        // 우선 순위가 높은 공격 후보지역 만들기(비어있음)
-        attackHighIndices = new List<int>(10);
-
-        // 공격 관련 변수(이전에 공격이 성공한 적 없다고 표시)
-        lastAttackSuccessPosition = NOT_SUCCESS;
-
-        // 행동이 완료되면 턴 진행 체크
-        onActionEnd += TurnManager.Inst.CheckTurnEnd;
-
-        // 패배하면 턴 메니저를 정지 시키기
-        onDefeat += (_) => TurnManager.Inst.TurnStop();
-
-        // 턴 시작 초기화 함수와 종로 함수 연결
-        TurnManager.Inst.onTurnStart += OnPlayerTurnStart;
-        TurnManager.Inst.onTurnEnd += OnPlayerTurnEnd;
     }
 
     // 턴 관리용 함수 ------------------------------------------------------------------------------
@@ -176,50 +219,50 @@ public class PlayerBase : MonoBehaviour
     /// <param name="attackGridPos">공격하는 위치</param>
     public void Attack(Vector2Int attackGridPos)
     {
-        if (!IsActionDone)  // 행동을 안했을 때만 처리
+        // 행동을 안했고, 공격 지점이 보드 안이고, 공격 가능한 위치일때만 처리
+        if (!IsActionDone && Board.IsInBoard(attackGridPos) && opponent.Board.IsAttackable(attackGridPos))  
         {
-            if (Board.IsInBoard(attackGridPos)) // 보드 안에 있을 때만 처리
+            Debug.Log($"{gameObject.name}가 ({attackGridPos.x},{attackGridPos.y})를 공격했습니다.");
+            bool result = opponent.Board.OnAttacked(attackGridPos);     // 상대방 보드에 공격
+            if (result)  // 공격 성공
             {
-                Debug.Log($"{gameObject.name}가 ({attackGridPos.x},{attackGridPos.y})를 공격했습니다.");
-                bool result = opponent.Board.OnAttacked(attackGridPos);     // 상대방 보드에 공격
-                if (result)  // 공격 성공
+                if (opponentShipDestroyed)
                 {
-                    if (opponentShipDestroyed)
-                    {
-                        // 이번 공격으로 적의 함선이 침몰했으면
-                        RemoveAllHigh();                // 후보지역 전부 제거
-                        opponentShipDestroyed = false;  // 표시 리셋
-                    }
-                    else
-                    {
-                        // 이번 공격으로 적의 함선이 침몰하지 않은 경우 
-
-                        // 이전 턴의 공격 성공 여부 확인
-                        if (lastAttackSuccessPosition != NOT_SUCCESS)
-                        {
-                            // 한턴 앞의 공격이 성공했다.
-                            AddHighFromTwoPoint(attackGridPos, lastAttackSuccessPosition);
-                        }
-                        else
-                        {
-                            // 처음 성공한 공격이다.
-                            AddHighFromNeighbors(attackGridPos);
-                        }
-                        lastAttackSuccessPosition = attackGridPos;  // 공격 성공했다고 표시
-                    }
+                    // 이번 공격으로 적의 함선이 침몰했으면
+                    RemoveAllHigh();                // 후보지역 전부 제거
+                    opponentShipDestroyed = false;  // 표시 리셋
                 }
                 else
                 {
-                    lastAttackSuccessPosition = NOT_SUCCESS;
-                }
+                    // 이번 공격으로 적의 함선이 침몰하지 않은 경우 
 
-                int attackIndex = Board.GridToIndex(attackGridPos);
-                RemoveHigh(attackIndex);            // 공격한 위치는 더 이상 후보지역이 아님
-                attackIndices.Remove(attackIndex);
+                    // 이전 턴의 공격 성공 여부 확인
+                    if (lastAttackSuccessPosition != NOT_SUCCESS)
+                    {
+                        // 한턴 앞의 공격이 성공했다.
+                        AddHighFromTwoPoint(attackGridPos, lastAttackSuccessPosition);
+                    }
+                    else
+                    {
+                        // 처음 성공한 공격이다.
+                        AddHighFromNeighbors(attackGridPos);
+                    }
+                    lastAttackSuccessPosition = attackGridPos;  // 공격 성공했다고 표시
+                }                    
+            }
+            else
+            {
+                failAttackCount++;
+                lastAttackSuccessPosition = NOT_SUCCESS;
+                onAttackFail?.Invoke(this);
+            }
 
-                isActionDone = true;    // 행동 완료했다고 표시
-                onActionEnd?.Invoke();  // 행동 완료했다고 알림
-            }  
+            int attackIndex = Board.GridToIndex(attackGridPos);
+            RemoveHigh(attackIndex);            // 공격한 위치는 더 이상 후보지역이 아님
+            attackIndices.Remove(attackIndex);
+
+            isActionDone = true;    // 행동 완료했다고 표시
+            onActionEnd?.Invoke();  // 행동 완료했다고 알림
         }
     }
 
@@ -287,6 +330,8 @@ public class PlayerBase : MonoBehaviour
             obj.transform.position = opponent.Board.IndexToWorld(index) + Vector3.up * 0.5f;    // 위치 배치
             Vector2Int grid = Board.IndexToGrid(index);
             obj.gameObject.name = $"High_({grid.x},{grid.y})";  // 이름 알아보기 쉽게 변경
+
+            obj.SetActive(GameManager.Inst.IsTestMode);         // 테스트 모드일 때만 보이기
 
             highMarks[index] = obj;                             // 딕셔너리에 기록
         }
@@ -666,7 +711,7 @@ public class PlayerBase : MonoBehaviour
 
                 // 실제 배치
                 board.ShipDeployment(ship, grid);
-                ship.gameObject.SetActive(true);
+                ship.gameObject.SetActive(isShowShips);
 
                 // 배치된 위치를 high와 low에서 제거
                 List<int> tempList = new List<int>(shipPositions.Length);
@@ -822,6 +867,14 @@ public class PlayerBase : MonoBehaviour
 
         Board.ResetBoard(ships);
         RemoveAllHigh();
+    }
+
+    /// <summary>
+    /// 게임 상태가 변경되었을 때 실행되는 델리게이트에 연결될 함수
+    /// </summary>
+    /// <param name="state">변화된 상태</param>
+    public virtual void OnStateChange(GameState state)
+    {
     }
 
     /// <summary>
